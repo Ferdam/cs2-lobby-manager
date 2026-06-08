@@ -268,6 +268,11 @@
       <input type="number" id="maxDisparity" value="9500" min="0" step="100" />
       <span style="font-size:12px;">(non-5-stack lobbies only)</span>
     </div>
+    <div class="config-row">
+      <label>Max players per lobby:</label>
+      <input type="number" id="maxPerLobby" value="5" min="2" max="5" step="1" />
+      <span style="font-size:12px;">(non-5-stack lobbies only)</span>
+    </div>
     <table>
       <thead><tr><th>Name</th><th>Rank</th><th></th></tr></thead>
       <tbody id="playerBody"></tbody>
@@ -382,6 +387,7 @@ const examplePlayerList =
 const tbody = document.getElementById('playerBody');
 const output = document.getElementById('output');
 const maxDispInput = document.getElementById('maxDisparity');
+const maxPerLobbyInput = document.getElementById('maxPerLobby');
 const historyList = document.getElementById('historyList');
 const historyCount = document.getElementById('historyCount');
 
@@ -770,7 +776,7 @@ function escapeHtml(s) {
 // Given players + maxDisparity, produce lobbies of size <= 5.
 // One lobby may be a "5-stack" (size exactly 5) ignoring disparity.
 // All other lobbies must have (maxRank - minRank) <= maxDisparity.
-function solve(players, maxDisp) {
+function solve(players, maxDisp, maxPerLobby = 5) {
   const N = players.length;
   if (N === 0) return { lobbies: [], note: 'No players.' };
   if (N <= 5) {
@@ -780,15 +786,13 @@ function solve(players, maxDisp) {
   // Sort by rank ascending. Keep original objects.
   const sorted = [...players].sort((a, b) => a.rank - b.rank);
 
-  // Greedy partition of a sorted slice into chunks of <=5 with spread <= maxDisp.
-  // Each chunk takes as many consecutive players as fit. Returns null if any single
-  // chunk can't even start (shouldn't happen for sane inputs).
+  // Greedy partition of a sorted slice into chunks of <=maxPerLobby with spread <= maxDisp.
   function partitionConstrained(slice) {
     const chunks = [];
     let i = 0;
     while (i < slice.length) {
       let j = i;
-      while (j < slice.length && j - i < 5 && slice[j].rank - slice[i].rank <= maxDisp) j++;
+      while (j < slice.length && j - i < maxPerLobby && slice[j].rank - slice[i].rank <= maxDisp) j++;
       if (j === i) return null;
       chunks.push(slice.slice(i, j));
       i = j;
@@ -804,7 +808,7 @@ function solve(players, maxDisp) {
     const minSize = Math.min(...sizes);
     const totalSpread = chunks.reduce((s, c) => s + (c[c.length-1].rank - c[0].rank), 0);
     // Lower is better. Heavily penalize tiny chunks (size 1 or 2 alone).
-    return chunks.length * 1e8 + (5 - minSize) * 1e5 + totalSpread;
+    return chunks.length * 1e8 + (maxPerLobby - minSize) * 1e5 + totalSpread;
   }
 
   // Strategy: pick 5 players for the "flex" 5-stack. Best candidates are extremes
@@ -878,9 +882,9 @@ function signatureOf(result) {
 // Find a random valid grouping (different from `avoidSignature` when possible).
 // "Valid" = one 5-stack (any 5 players) + remaining players partitioned, in
 // sorted-by-rank order, into chunks of <=5 each with spread <= maxDisp.
-function solveShuffle(players, maxDisp, avoidSignature) {
+function solveShuffle(players, maxDisp, avoidSignature, maxPerLobby = 5) {
   const N = players.length;
-  if (N <= 5) return solve(players, maxDisp);
+  if (N <= 5) return solve(players, maxDisp, maxPerLobby);
   const sorted = [...players].sort((a, b) => a.rank - b.rank);
 
   function partitionConstrained(slice) {
@@ -888,7 +892,7 @@ function solveShuffle(players, maxDisp, avoidSignature) {
     let i = 0;
     while (i < slice.length) {
       let j = i;
-      while (j < slice.length && j - i < 5 && slice[j].rank - slice[i].rank <= maxDisp) j++;
+      while (j < slice.length && j - i < maxPerLobby && slice[j].rank - slice[i].rank <= maxDisp) j++;
       if (j === i) return null;
       chunks.push(slice.slice(i, j));
       i = j;
@@ -932,7 +936,7 @@ function solveShuffle(players, maxDisp, avoidSignature) {
   // Prioritize full 5-player lobbies: the 5-stack is always 5, so count how
   // many of the remaining chunks are also size 5 and keep only the solutions
   // tied for the maximum.
-  const fullFives = v => 1 + v.chunks.filter(c => c.length === 5).length;
+  const fullFives = v => 1 + v.chunks.filter(c => c.length === maxPerLobby).length;
   const maxFulls = valid.reduce((m, v) => Math.max(m, fullFives(v)), 0);
   const prioritized = valid.filter(v => fullFives(v) === maxFulls);
 
@@ -1030,10 +1034,14 @@ document.getElementById('clearAll').addEventListener('click', () => {
 
 let lastSignature = null;
 
+function readMaxPerLobby() {
+  return Math.min(5, Math.max(2, Number(maxPerLobbyInput.value) || 5));
+}
+
 document.getElementById('solve').addEventListener('click', () => {
   const players = readPlayers(true);
   const maxDisp = Math.max(0, Number(maxDispInput.value) || 0);
-  const result = solve(players, maxDisp);
+  const result = solve(players, maxDisp, readMaxPerLobby());
   lastSignature = signatureOf(result);
   render(result, maxDisp);
 });
@@ -1041,17 +1049,20 @@ document.getElementById('solve').addEventListener('click', () => {
 document.getElementById('shuffle').addEventListener('click', () => {
   const players = readPlayers(true);
   const maxDisp = Math.max(0, Number(maxDispInput.value) || 0);
-  const result = solveShuffle(players, maxDisp, lastSignature);
+  const result = solveShuffle(players, maxDisp, lastSignature, readMaxPerLobby());
   lastSignature = signatureOf(result);
   render(result, maxDisp);
 });
 maxDispInput.addEventListener('change', () => localStorage.setItem('cs2-lobbymaker-disp', maxDispInput.value));
+maxPerLobbyInput.addEventListener('change', () => localStorage.setItem('cs2-lobbymaker-maxlobby', maxPerLobbyInput.value));
 
 // Init
 loadHistory();
 renderHistory();
 const savedDisp = localStorage.getItem('cs2-lobbymaker-disp');
 if (savedDisp) maxDispInput.value = savedDisp;
+const savedMaxLobby = localStorage.getItem('cs2-lobbymaker-maxlobby');
+if (savedMaxLobby) maxPerLobbyInput.value = savedMaxLobby;
 
 // Auto-save toggle
 const autoSaveEl = document.getElementById('autoSave');
