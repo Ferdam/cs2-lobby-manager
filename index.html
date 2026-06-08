@@ -182,6 +182,14 @@
   .history-item .h-remove:hover { color: var(--bad); }
   .history-toolbar { display: grid; gap: 6px; margin-bottom: 10px; align-items: center; }
   .history-toolbar .count { font-size: 12px; color: var(--muted); margin-left: auto; }
+  .search-wrap { position: relative; margin-bottom: 8px; }
+  .search-wrap input { padding-right: 28px; }
+  .search-clear {
+    position: absolute; top: 50%; right: 4px; transform: translateY(-50%);
+    background: none; border: none; color: var(--muted);
+    padding: 2px 6px; font-size: 13px; cursor: pointer; border-radius: 3px;
+  }
+  .search-clear:hover { color: var(--text); background: var(--panel-2); border-color: transparent; }
 
   /* Modal */
   .modal-backdrop {
@@ -252,7 +260,10 @@
       </div>
       <span class="count" id="historyCount"></span>
     </div>
-    <input type="text" id="historySearch" placeholder="Search players…" style="margin-bottom:8px;" />
+    <div class="search-wrap">
+      <input type="text" id="historySearch" placeholder="Search players…" />
+      <button type="button" id="historySearchClear" class="search-clear" title="Clear search" hidden>✕</button>
+    </div>
     <div class="history-list" id="historyList"></div>
   </div>
 
@@ -273,7 +284,10 @@
     <div class="config-row">
       <label>Max players per lobby:</label>
       <input type="number" id="maxPerLobby" value="5" min="2" max="5" step="1" />
-      <span style="font-size:12px;">(non-5-stack lobbies only)</span>
+      <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;">
+        <input type="checkbox" id="strictLobbySize" />
+        <span>Strict size (every lobby = max)</span>
+      </label>
     </div>
     <table>
       <thead><tr><th>Name</th><th>Rank</th><th></th></tr></thead>
@@ -550,9 +564,22 @@ document.getElementById('unselectAll').addEventListener('click', () => {
   selectedHistory.clear();
   renderHistory();
 });
-document.getElementById('historySearch').addEventListener('input', (e) => {
+const historySearchInput = document.getElementById('historySearch');
+const historySearchClearBtn = document.getElementById('historySearchClear');
+function syncSearchClear() {
+  historySearchClearBtn.hidden = !historySearchInput.value.length;
+}
+historySearchInput.addEventListener('input', (e) => {
   historySearchQuery = e.target.value;
+  syncSearchClear();
   renderHistory();
+});
+historySearchClearBtn.addEventListener('click', () => {
+  historySearchInput.value = '';
+  historySearchQuery = '';
+  syncSearchClear();
+  renderHistory();
+  historySearchInput.focus();
 });
 
 // ---- Modal + export/import ------------------------------------------------
@@ -794,7 +821,7 @@ function escapeHtml(s) {
 // Given players + maxDisparity, produce lobbies of size <= 5.
 // One lobby may be a "5-stack" (size exactly 5) ignoring disparity.
 // All other lobbies must have (maxRank - minRank) <= maxDisparity.
-function solve(players, maxDisp, maxPerLobby = 5) {
+function solve(players, maxDisp, maxPerLobby = 5, strict = false) {
   const N = players.length;
   if (N === 0) return { lobbies: [], note: 'No players.' };
 
@@ -820,7 +847,11 @@ function solve(players, maxDisp, maxPerLobby = 5) {
       return { lobbies: [{ players: sorted, fiveStack: false }],
                note: 'Could not find a valid grouping with current disparity. Adjust ranks or limit.' };
     }
-    return { lobbies: chunks.map(c => ({ players: c, fiveStack: false })), note: null };
+    let note = null;
+    if (strict && chunks.some(c => c.length !== maxPerLobby)) {
+      note = `Strict size: ${N} players don't divide evenly into lobbies of ${maxPerLobby}.`;
+    }
+    return { lobbies: chunks.map(c => ({ players: c, fiveStack: false })), note };
   }
 
   if (N <= 5) {
@@ -930,10 +961,12 @@ function signatureOf(result) {
 // Random valid grouping when there is no 5-stack exemption (maxPerLobby < 5).
 // Every lobby must be size ≤ maxPerLobby AND spread ≤ maxDisp.
 // We sample many random assignments into `minLobbies = ceil(N / maxPerLobby)` bins.
-function solveShuffleNoStack(players, maxDisp, avoidSignature, maxPerLobby) {
+function solveShuffleNoStack(players, maxDisp, avoidSignature, maxPerLobby, strict = false) {
   const N = players.length;
   if (N === 0) return { lobbies: [], note: 'No players.' };
   const minLobbies = Math.ceil(N / maxPerLobby);
+  // Strict mode requires every bin to be exactly maxPerLobby — only possible when N is a multiple.
+  const strictImpossible = strict && (N % maxPerLobby !== 0);
 
   // Signature for "no-5-stack" mode: the set of sorted-name groups, sorted.
   // Lets us avoid the previous result on consecutive shuffles.
@@ -969,6 +1002,8 @@ function solveShuffleNoStack(players, maxDisp, avoidSignature, maxPerLobby) {
       if (Math.max(...ranks) - Math.min(...ranks) > maxDisp) { valid_ = false; break; }
     }
     if (!valid_) continue;
+    // Strict size: every bin must be exactly maxPerLobby.
+    if (strict && !strictImpossible && bins.some(b => b.length !== maxPerLobby)) continue;
     // Sort each bin by rank desc for nice display.
     for (const bin of bins) bin.sort((a, b) => b.rank - a.rank);
     const sig = sigOf(bins);
@@ -979,7 +1014,11 @@ function solveShuffleNoStack(players, maxDisp, avoidSignature, maxPerLobby) {
 
   if (!valid.length) {
     // No valid random grouping; fall back to deterministic solve.
-    return solve(players, maxDisp, maxPerLobby);
+    const fb = solve(players, maxDisp, maxPerLobby, strict);
+    if (strictImpossible && !fb.note) {
+      fb.note = `Strict size: ${N} players don't divide evenly into lobbies of ${maxPerLobby}.`;
+    }
+    return fb;
   }
 
   // Prefer different from last shuffle.
@@ -994,13 +1033,16 @@ function solveShuffleNoStack(players, maxDisp, avoidSignature, maxPerLobby) {
       const avg = arr => arr.reduce((s, p) => s + p.rank, 0) / arr.length;
       return avg(b.players) - avg(a.players);
     });
-  return { lobbies, note: null, _sig: pick.sig };
+  const note = strictImpossible
+    ? `Strict size: ${N} players don't divide evenly into lobbies of ${maxPerLobby}.`
+    : null;
+  return { lobbies, note, _sig: pick.sig };
 }
 
-function solveShuffle(players, maxDisp, avoidSignature, maxPerLobby = 5) {
+function solveShuffle(players, maxDisp, avoidSignature, maxPerLobby = 5, strict = false) {
   const N = players.length;
-  if (maxPerLobby < 5) return solveShuffleNoStack(players, maxDisp, avoidSignature, maxPerLobby);
-  if (N <= 5) return solve(players, maxDisp, maxPerLobby);
+  if (maxPerLobby < 5) return solveShuffleNoStack(players, maxDisp, avoidSignature, maxPerLobby, strict);
+  if (N <= 5) return solve(players, maxDisp, maxPerLobby, strict);
   const sorted = [...players].sort((a, b) => a.rank - b.rank);
 
   function partitionConstrained(slice) {
@@ -1153,11 +1195,13 @@ let lastSignature = null;
 function readMaxPerLobby() {
   return Math.min(5, Math.max(2, Number(maxPerLobbyInput.value) || 5));
 }
+const strictInput = document.getElementById('strictLobbySize');
+function readStrict() { return !!strictInput.checked; }
 
 document.getElementById('solve').addEventListener('click', () => {
   const players = readPlayers(true);
   const maxDisp = Math.max(0, Number(maxDispInput.value) || 0);
-  const result = solve(players, maxDisp, readMaxPerLobby());
+  const result = solve(players, maxDisp, readMaxPerLobby(), readStrict());
   lastSignature = signatureOf(result);
   render(result, maxDisp);
 });
@@ -1165,12 +1209,13 @@ document.getElementById('solve').addEventListener('click', () => {
 document.getElementById('shuffle').addEventListener('click', () => {
   const players = readPlayers(true);
   const maxDisp = Math.max(0, Number(maxDispInput.value) || 0);
-  const result = solveShuffle(players, maxDisp, lastSignature, readMaxPerLobby());
+  const result = solveShuffle(players, maxDisp, lastSignature, readMaxPerLobby(), readStrict());
   lastSignature = signatureOf(result);
   render(result, maxDisp);
 });
 maxDispInput.addEventListener('change', () => localStorage.setItem('cs2-lobbymaker-disp', maxDispInput.value));
 maxPerLobbyInput.addEventListener('change', () => localStorage.setItem('cs2-lobbymaker-maxlobby', maxPerLobbyInput.value));
+strictInput.addEventListener('change', () => localStorage.setItem('cs2-lobbymaker-strict', strictInput.checked ? '1' : '0'));
 
 // Init
 loadHistory();
@@ -1179,6 +1224,8 @@ const savedDisp = localStorage.getItem('cs2-lobbymaker-disp');
 if (savedDisp) maxDispInput.value = savedDisp;
 const savedMaxLobby = localStorage.getItem('cs2-lobbymaker-maxlobby');
 if (savedMaxLobby) maxPerLobbyInput.value = savedMaxLobby;
+const savedStrict = localStorage.getItem('cs2-lobbymaker-strict');
+if (savedStrict === '1') strictInput.checked = true;
 
 // Auto-save toggle
 const autoSaveEl = document.getElementById('autoSave');
