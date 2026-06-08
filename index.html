@@ -915,19 +915,91 @@ function solve(players, maxDisp, maxPerLobby = 5) {
 // the remaining players, sorted by rank, must be packed contiguously).
 function signatureOf(result) {
   if (!result || !result.lobbies) return null;
+  if (result._sig) return result._sig;
   const stack = result.lobbies.find(l => l.fiveStack);
-  if (!stack) return null;
-  return stack.players.map(p => p.name).slice().sort().join('|');
+  if (stack) return stack.players.map(p => p.name).slice().sort().join('|');
+  // No-stack mode: signature is the full set of groups (sorted-name groups, sorted).
+  return result.lobbies
+    .map(l => l.players.map(p => p.name).slice().sort().join(','))
+    .slice().sort().join('|');
 }
 
 // Find a random valid grouping (different from `avoidSignature` when possible).
 // "Valid" = one 5-stack (any 5 players) + remaining players partitioned, in
 // sorted-by-rank order, into chunks of <=5 each with spread <= maxDisp.
+// Random valid grouping when there is no 5-stack exemption (maxPerLobby < 5).
+// Every lobby must be size ≤ maxPerLobby AND spread ≤ maxDisp.
+// We sample many random assignments into `minLobbies = ceil(N / maxPerLobby)` bins.
+function solveShuffleNoStack(players, maxDisp, avoidSignature, maxPerLobby) {
+  const N = players.length;
+  if (N === 0) return { lobbies: [], note: 'No players.' };
+  const minLobbies = Math.ceil(N / maxPerLobby);
+
+  // Signature for "no-5-stack" mode: the set of sorted-name groups, sorted.
+  // Lets us avoid the previous result on consecutive shuffles.
+  const sigOf = (groups) => groups
+    .map(g => g.map(p => p.name).slice().sort().join(','))
+    .slice().sort().join('|');
+
+  const valid = [];
+  const seenSigs = new Set();
+  const TRIES = 1500;
+  for (let t = 0; t < TRIES; t++) {
+    // Shuffle player order, then distribute round-robin-ish into bins of cap maxPerLobby.
+    const shuffled = players.slice();
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    const bins = Array.from({length: minLobbies}, () => []);
+    // Random assignment: pick a bin with remaining capacity for each player.
+    let ok = true;
+    for (const p of shuffled) {
+      const candidates = [];
+      for (let b = 0; b < bins.length; b++) if (bins[b].length < maxPerLobby) candidates.push(b);
+      if (!candidates.length) { ok = false; break; }
+      const b = candidates[Math.floor(Math.random() * candidates.length)];
+      bins[b].push(p);
+    }
+    if (!ok) continue;
+    // Validate spread per bin.
+    let valid_ = true;
+    for (const bin of bins) {
+      const ranks = bin.map(p => p.rank);
+      if (Math.max(...ranks) - Math.min(...ranks) > maxDisp) { valid_ = false; break; }
+    }
+    if (!valid_) continue;
+    // Sort each bin by rank desc for nice display.
+    for (const bin of bins) bin.sort((a, b) => b.rank - a.rank);
+    const sig = sigOf(bins);
+    if (seenSigs.has(sig)) continue;
+    seenSigs.add(sig);
+    valid.push({ groups: bins, sig });
+  }
+
+  if (!valid.length) {
+    // No valid random grouping; fall back to deterministic solve.
+    return solve(players, maxDisp, maxPerLobby);
+  }
+
+  // Prefer different from last shuffle.
+  const pool = avoidSignature ? valid.filter(v => v.sig !== avoidSignature) : valid;
+  const finalPool = pool.length ? pool : valid;
+  const pick = finalPool[Math.floor(Math.random() * finalPool.length)];
+
+  // Order lobbies by their average rank desc, for a stable, readable display.
+  const lobbies = pick.groups
+    .map(g => ({ players: g, fiveStack: false }))
+    .sort((a, b) => {
+      const avg = arr => arr.reduce((s, p) => s + p.rank, 0) / arr.length;
+      return avg(b.players) - avg(a.players);
+    });
+  return { lobbies, note: null, _sig: pick.sig };
+}
+
 function solveShuffle(players, maxDisp, avoidSignature, maxPerLobby = 5) {
   const N = players.length;
-  // No 5-stack when the cap is below 5 — just defer to solve() (deterministic
-  // greedy partition is already optimal for contiguous chunks).
-  if (maxPerLobby < 5) return solve(players, maxDisp, maxPerLobby);
+  if (maxPerLobby < 5) return solveShuffleNoStack(players, maxDisp, avoidSignature, maxPerLobby);
   if (N <= 5) return solve(players, maxDisp, maxPerLobby);
   const sorted = [...players].sort((a, b) => a.rank - b.rank);
 
