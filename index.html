@@ -244,6 +244,7 @@
       <div style="display: flex; gap: 8px; flex-wrap: wrap;" class="toolbar-group">
         <button id="copyFromHistory" title="Copy selected players to the Players table">→ Add Selected</button>
         <button id="copyAllFromHistory" title="Copy all history entries to the Players table">→ Add All</button>
+        <button id="unselectAll" title="Clear current selection">⊘ Unselect all</button>
       </div>
       <div style="display: flex; gap: 8px; flex-wrap: wrap;" class="toolbar-group">
         <button id="exportHistory" title="Export saved players as JSON">⤒ Export Player List</button>
@@ -251,6 +252,7 @@
       </div>
       <span class="count" id="historyCount"></span>
     </div>
+    <input type="text" id="historySearch" placeholder="Search players…" style="margin-bottom:8px;" />
     <div class="history-list" id="historyList"></div>
   </div>
 
@@ -442,10 +444,11 @@ function updateHistoryFromRows() {
   }
   if (changed) { saveHistory(); renderHistory(); }
 }
+let historySearchQuery = '';
 function renderHistory() {
-  const entries = Object.values(history).sort((a, b) => b.rank - a.rank);
-  historyCount.textContent = entries.length ? `${entries.length} saved` : '';
-  if (!entries.length) {
+  const allEntries = Object.values(history).sort((a, b) => b.rank - a.rank);
+  historyCount.textContent = allEntries.length ? `${allEntries.length} saved` : '';
+  if (!allEntries.length) {
     historyList.innerHTML = `
       <div class="empty" style="padding:12px;">
         <div style="margin-bottom:10px;">No history yet. Names you enter will appear here.</div>
@@ -453,6 +456,12 @@ function renderHistory() {
       </div>`;
     const btn = document.getElementById('loadExampleBtn');
     if (btn) btn.addEventListener('click', loadExampleIntoHistory);
+    return;
+  }
+  const q = historySearchQuery.trim().toLowerCase();
+  const entries = q ? allEntries.filter(e => e.name.toLowerCase().includes(q)) : allEntries;
+  if (!entries.length) {
+    historyList.innerHTML = `<div class="empty" style="padding:12px;">No matches for "${escapeHtml(historySearchQuery)}".</div>`;
     return;
   }
   historyList.innerHTML = entries.map(e => {
@@ -536,6 +545,15 @@ function copyHistoryToPlayers(all = false) {
 }
 document.getElementById('copyFromHistory').addEventListener('click', () => copyHistoryToPlayers(false));
 document.getElementById('copyAllFromHistory').addEventListener('click', () => copyHistoryToPlayers(true));
+document.getElementById('unselectAll').addEventListener('click', () => {
+  if (!selectedHistory.size) return;
+  selectedHistory.clear();
+  renderHistory();
+});
+document.getElementById('historySearch').addEventListener('input', (e) => {
+  historySearchQuery = e.target.value;
+  renderHistory();
+});
 
 // ---- Modal + export/import ------------------------------------------------
 const modal = document.getElementById('modal');
@@ -779,12 +797,35 @@ function escapeHtml(s) {
 function solve(players, maxDisp, maxPerLobby = 5) {
   const N = players.length;
   if (N === 0) return { lobbies: [], note: 'No players.' };
-  if (N <= 5) {
-    return { lobbies: [{ players, fiveStack: N === 5 }], note: null };
-  }
 
   // Sort by rank ascending. Keep original objects.
   const sorted = [...players].sort((a, b) => a.rank - b.rank);
+
+  // When the user caps lobbies below 5, there is no 5-stack exemption to use —
+  // partition everyone by spread + size cap.
+  if (maxPerLobby < 5) {
+    const chunks = (function partition(slice) {
+      const out = [];
+      let i = 0;
+      while (i < slice.length) {
+        let j = i;
+        while (j < slice.length && j - i < maxPerLobby && slice[j].rank - slice[i].rank <= maxDisp) j++;
+        if (j === i) return null;
+        out.push(slice.slice(i, j));
+        i = j;
+      }
+      return out;
+    })(sorted);
+    if (!chunks) {
+      return { lobbies: [{ players: sorted, fiveStack: false }],
+               note: 'Could not find a valid grouping with current disparity. Adjust ranks or limit.' };
+    }
+    return { lobbies: chunks.map(c => ({ players: c, fiveStack: false })), note: null };
+  }
+
+  if (N <= 5) {
+    return { lobbies: [{ players, fiveStack: N === 5 }], note: null };
+  }
 
   // Greedy partition of a sorted slice into chunks of <=maxPerLobby with spread <= maxDisp.
   function partitionConstrained(slice) {
@@ -884,6 +925,9 @@ function signatureOf(result) {
 // sorted-by-rank order, into chunks of <=5 each with spread <= maxDisp.
 function solveShuffle(players, maxDisp, avoidSignature, maxPerLobby = 5) {
   const N = players.length;
+  // No 5-stack when the cap is below 5 — just defer to solve() (deterministic
+  // greedy partition is already optimal for contiguous chunks).
+  if (maxPerLobby < 5) return solve(players, maxDisp, maxPerLobby);
   if (N <= 5) return solve(players, maxDisp, maxPerLobby);
   const sorted = [...players].sort((a, b) => a.rank - b.rank);
 
